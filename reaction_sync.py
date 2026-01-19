@@ -96,6 +96,7 @@ class GripWidget(QWidget):
         # Make this a native window so it sits ON TOP of the MPV native window
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
         self.setMouseTracking(True)
         self.margin = 10
