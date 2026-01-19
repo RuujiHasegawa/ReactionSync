@@ -34,7 +34,9 @@ ReactionSync is a Python-based desktop application designed for syncing two vide
 3.  **Download libmpv**
     - Go to [SourceForge - mpv-player-windows/libmpv](https://sourceforge.net/projects/mpv-player-windows/files/libmpv/).
     - Download the latest `mpv-dev-x86_64-...` archive.
-    - Extract `mpv-2.dll` (or `mpv-1.dll`) and place it in the `libs` folder (create it if it doesn't exist) inside the `ReactionSync` root.
+    - Extract the main DLL file (often named `libmpv-2.dll` or similar).
+    - **Rename it** to `mpv-2.dll` (if it's not already).
+    - Place the `mpv-2.dll` file into the `libs/` folder inside the `ReactionSync` root directory.
 
 ## Usage
 
