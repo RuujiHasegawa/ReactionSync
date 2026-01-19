@@ -1,8 +1,16 @@
 import sys
 import os
+import atexit
+from typing import Optional, Union, Tuple
 
 # Ensure the local directory is in the PATH so python-mpv can find the DLL
-os.environ["PATH"] = os.path.dirname(os.path.abspath(__file__)) + os.path.sep + "libs" + os.pathsep + os.environ["PATH"]
+# We look for "libs" folder first
+LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "libs")
+if os.path.exists(LIB_DIR):
+    os.environ["PATH"] = LIB_DIR + os.pathsep + os.environ["PATH"]
+
+# Also add current directory as fallback (legacy)
+os.environ["PATH"] = os.path.dirname(os.path.abspath(__file__)) + os.pathsep + os.environ["PATH"]
 
 import mpv
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
@@ -11,15 +19,19 @@ from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
 from PyQt6.QtCore import Qt, QTimer, QPoint, QRect, QEvent
 from PyQt6.QtGui import QMouseEvent, QCursor
 
+# Constants
+REFRESH_RATE_MS = 250
+SYNC_THRESHOLD_SEC = 0.5
+MIN_WINDOW_SIZE = (1000, 600)
+OVERLAY_DEFAULT_SIZE = (320, 180)
+OVERLAY_DEFAULT_POS = (20, 20)
+
 # -----------------------------------------------------------------------------
 # 1. MPV Check
 # -----------------------------------------------------------------------------
-def check_mpv_available():
+def check_mpv_available() -> bool:
     """Checks if MPV library can be initialized."""
     try:
-        # Just try to instantiate. If no libmpv found, it usually raises OSError or similar.
-        # python-mpv usually handles searching the PATH, but on Windows 
-        # the user often needs to put mpv-2.dll or mpv-1.dll next to the script.
         m = mpv.MPV()
         m.terminate()
         return True
@@ -38,7 +50,7 @@ class DragResizableWidget(QFrame):
       - Layer 1: Grip Overlay (Transparent, handles mouse)
     to avoid event stealing by the child video widget.
     """
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setFrameStyle(QFrame.Shape.Box | QFrame.Shadow.Raised)
         self.setLineWidth(2)
@@ -52,13 +64,14 @@ class DragResizableWidget(QFrame):
         self.grip = GripWidget(self)
         self.layout_.addWidget(self.grip) # Added LAST so it's ON TOP
         
-        # We also need a placeholder container for the content if we want to add/remove
+        # Placeholder container for content
         self.content_container = QWidget()
         self.content_layout = QVBoxLayout(self.content_container)
         self.content_layout.setContentsMargins(0,0,0,0)
         self.layout_.insertWidget(0, self.content_container) # At bottom
 
-    def set_content(self, widget):
+    def set_content(self, widget: QWidget) -> None:
+        """Replace the current content widget with a new one."""
         # Clear existing content
         while self.content_layout.count():
             item = self.content_layout.takeAt(0)
@@ -66,25 +79,24 @@ class DragResizableWidget(QFrame):
                 item.widget().setParent(None)
         
         self.content_layout.addWidget(widget)
-        # Ensure grip is raised
+        # Ensure grip is raised to capture mouse events on edges
         self.grip.raise_()
 
-    # Pass resize events to grip to ensure it stays sized (though layout handles it)
-    def resizeEvent(self, event):
+    def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.grip.resize(self.size())
 
 
 class GripWidget(QWidget):
     """Transparent overlay that handles drag/resize logic for its parent."""
-    def __init__(self, parent_resizable):
+    def __init__(self, parent_resizable: QWidget):
         super().__init__(parent_resizable)
         self.target = parent_resizable
         self.setMouseTracking(True)
         self.margin = 10
         self._is_moving = False
         self._is_resizing = False
-        self._resize_edge = None
+        self._resize_edge: Optional[str] = None
         self._drag_start_pos = QPoint()
         
         # Transparent
@@ -103,23 +115,14 @@ class GripWidget(QWidget):
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self._is_moving:
-            # Move the TARGET (parent)
-            # mapToParent of the *target*?
-            # event.pos() is relative to Grip. Grip is at (0,0) of Target.
-            # So event.pos() IS relative to Target.
-            # We want to move Target relative to Target's Parent.
-            
-            # Diff calculation:
-            # We need to move the target such that the mouse stays at the same relative spot.
-            # simple 'move' logic:
-            # new_top_left_of_target = event.globalPosition() - offset
-            # But simpler:
-            
+            # Move the TARGET (parent) relative to its parent
+            # Calculate the offset relative to the initial click position
             target_parent_pos = self.target.mapToParent(event.pos() - self._drag_start_pos)
             
-            # Boundary check
+            # Boundary check if parent exists
             if self.target.parentWidget():
                 p_rect = self.target.parentWidget().rect()
+                # Keep somewhat inside boundaries
                 new_x = max(0, min(target_parent_pos.x(), p_rect.width() - 20))
                 new_y = max(0, min(target_parent_pos.y(), p_rect.height() - 20))
                 self.target.move(new_x, new_y)
@@ -127,7 +130,7 @@ class GripWidget(QWidget):
                 self.target.move(target_parent_pos)
             return
 
-        if self._is_resizing:
+        if self._is_resizing and self._resize_edge:
             self._handle_resize(event.globalPosition().toPoint())
             return
 
@@ -141,21 +144,15 @@ class GripWidget(QWidget):
         self.unsetCursor()
 
     def mouseDoubleClickEvent(self, event):
-        # Forward double clicks to the content? Or handle fullscreen?
-        # Let's try to assume double click on overlay means fullscreen current overlay content.
-        # But for now, let's just pass it through or ignore. 
-        # Actually, user wants fullscreen. 
-        # If we double click the overlay, it should fullscreen the overlay (Vid2).
         if event.button() == Qt.MouseButton.LeftButton:
-            # Trigger fullscreen on the vid2 widget?
-            # Or better: check if we have a content widget
-            layout = self.target.content_layout
+            # Trigger fullscreen on the content widget if applicable
+            layout = self.target.content_layout # type: ignore
             if layout.count() > 0:
                  widget = layout.itemAt(0).widget()
                  if isinstance(widget, VideoWidget):
                      widget._trigger_fullscreen()
 
-    def _get_edge(self, pos):
+    def _get_edge(self, pos: QPoint) -> Optional[str]:
         r = self.rect()
         x, y, w, h = pos.x(), pos.y(), r.width(), r.height()
         m = self.margin
@@ -175,7 +172,7 @@ class GripWidget(QWidget):
         if on_right: return 'right'
         return None
 
-    def _update_cursor(self, edge):
+    def _update_cursor(self, edge: Optional[str]):
         if edge in ['top_left', 'bottom_right']:
             self.setCursor(Qt.CursorShape.SizeFDiagCursor)
         elif edge in ['top_right', 'bottom_left']:
@@ -187,7 +184,7 @@ class GripWidget(QWidget):
         else:
             self.setCursor(Qt.CursorShape.ArrowCursor)
 
-    def _handle_resize(self, global_mouse_pos):
+    def _handle_resize(self, global_mouse_pos: QPoint):
         diff = global_mouse_pos - self._drag_start_pos
         self._drag_start_pos = global_mouse_pos
         
@@ -196,44 +193,51 @@ class GripWidget(QWidget):
         
         dx, dy = diff.x(), diff.y()
         
-        if 'top' in self._resize_edge:
+        if self._resize_edge and 'top' in self._resize_edge:
             new_geo.setTop(geo.top() + dy)
-        if 'bottom' in self._resize_edge:
+        if self._resize_edge and 'bottom' in self._resize_edge:
             new_geo.setBottom(geo.bottom() + dy)
-        if 'left' in self._resize_edge:
+        if self._resize_edge and 'left' in self._resize_edge:
             new_geo.setLeft(geo.left() + dx)
-        if 'right' in self._resize_edge:
+        if self._resize_edge and 'right' in self._resize_edge:
             new_geo.setRight(geo.right() + dx)
              
+        # Enforce Minimum Size 
         if new_geo.width() < self.target.minimumWidth():
-            if 'left' in self._resize_edge: new_geo.setLeft(geo.left())
+            if self._resize_edge and 'left' in self._resize_edge: new_geo.setLeft(geo.left())
             else: new_geo.setRight(geo.right())
         
         if new_geo.height() < self.target.minimumHeight():
-            if 'top' in self._resize_edge: new_geo.setTop(geo.top())
+            if self._resize_edge and 'top' in self._resize_edge: new_geo.setTop(geo.top())
             else: new_geo.setBottom(geo.bottom())
 
         self.target.setGeometry(new_geo)
+
 
 # -----------------------------------------------------------------------------
 # 3. Video Widget (MPV wrapper)
 # -----------------------------------------------------------------------------
 class VideoWidget(QWidget):
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         
-        # Initialize MPV
-        # vo='wid' allows embedding. input_default_bindings=True gives basic key bindings if focused
+        self.player: Optional[mpv.MPV] = None
         try:
+            # vo='gpu' is generally best. keep_open='yes' prevents player closing on EOF
             self.player = mpv.MPV(wid=str(int(self.winId())), vo='gpu', keep_open='yes', log_handler=lambda level, prefix, text: None)
         except Exception as e:
-            # Fallback for debugging if dll missing, though check_mpv_available should catch it
             print(f"MPV Init failed: {e}")
             self.player = None
 
-    def load(self, filepath):
+    def closeEvent(self, event):
+        if self.player:
+            self.player.terminate()
+            self.player = None
+        super().closeEvent(event)
+
+    def load(self, filepath: str):
         if self.player:
             self.player.play(filepath)
             self.player.pause = True # Start paused
@@ -244,55 +248,51 @@ class VideoWidget(QWidget):
     def pause(self):
         if self.player: self.player.pause = True
 
-    def toggle_pause(self):
+    def toggle_pause(self) -> bool:
         if self.player: 
             self.player.pause = not self.player.pause
             return self.player.pause
         return True
 
-    def seek(self, time_seconds):
+    def seek(self, time_seconds: float):
         if self.player:
             self.player.time_pos = time_seconds
 
-    def get_time(self):
+    def get_time(self) -> float:
         if self.player:
-            return self.player.time_pos or 0
-        return 0
+            return self.player.time_pos or 0.0
+        return 0.0
 
-    def get_duration(self):
+    def get_duration(self) -> float:
         if self.player:
-            return self.player.duration or 0
-        return 0
+            return self.player.duration or 0.0
+        return 0.0
     
-    def set_volume(self, volume):
+    def set_volume(self, volume: int):
         if self.player:
             self.player.volume = volume
 
-    def mouseDoubleClickEvent(self, event):
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
             self._trigger_fullscreen()
             
     def _trigger_fullscreen(self):
-        # We need to find the MainWindow to handle its specific fullscreen logic (Hiding controls)
-        # Or if we are in a SecondaryWindow, just toggle that.
-        
         # Traverse up to find MainWindow or SecondaryWindow
         p = self.window()
         
-        # If it's the secondary window (just a wrapper), simple window fullscreen works
         if isinstance(p, SecondaryWindow):
             if p.isFullScreen(): p.showNormal()
             else: p.showFullScreen()
             return
 
-        # If it's the MainWindow, we need to call a method on it to hide/show controls
         if isinstance(p, MainWindow):
-            p.toggle_video_fullscreen(self) # Pass self so it knows WHICH video if needed
+            p.toggle_video_fullscreen(self)
             return
             
         # Fallback
         if p.isFullScreen(): p.showNormal()
         else: p.showFullScreen()
+
 
 # -----------------------------------------------------------------------------
 # 4. Main Window
@@ -301,61 +301,60 @@ class MainWindow(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("ReactionSync - MPV Dual Player")
-        self.resize(1000, 600)
+        self.resize(*MIN_WINDOW_SIZE)
 
-        # State
-        self.overlay_mode = False
-        self.duration_video1 = 1.0 # Avoid div by zero
+        # Application State
         self.is_playing = False
+        self.overlay_mode = False
+        self.is_fullscreen_video = False
+        self.duration_video1 = 1.0 
         self.offset = 0.0
-        self.is_fullscreen_video = False # Track refined fullscreen state
+        self._user_seeking = False
 
-        # UI Components
-        self._init_ui()
-        
-        # Timer for UI updates (slider position)
-        self.timer = QTimer()
-        self.timer.setInterval(250) # 4 times a second
-        self.timer.timeout.connect(self._update_progress)
-        self.timer.start()
-
-    def _init_ui(self):
-        # --- Layouts ---
+        # --- Initialize UI Components ---
         self.main_layout = QVBoxLayout(self)
         
-        # --- Video 1 (Reaction) - Inside Main Window ---
+        # 1. Video Components
+        self._setup_videos()
+
+        # 2. Controls
+        self._setup_controls()
+
+        # 3. Overlay Wrapper
+        self._setup_overlay()
+        
+        # 4. State Management for Views
+        # Track which logic source is where. 
+        # Source 1 = Reaction (Master), Source 2 = Anime (Follower)
+        # We start with S1 in Main, S2 in Secondary Window
+        self.primary_video_widget = self.vid1_widget # The one in the main container
+        self.secondary_video_widget = self.vid2_widget # The one in the other window/overlay
+
+        # Start Timer
+        self._setup_timer()
+
+    def _setup_videos(self):
+        # Master Video Container (Slot 1)
         self.vid1_label = QLabel("Reaction Video (Master)")
         self.vid1_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.vid1 = VideoWidget()
+        self.vid1_widget = VideoWidget()
         
-        # We put Vid1 in a container so we can treat it similarly to before if needed
-        self.vid1_container = QWidget()
-        self.vid1_layout = QVBoxLayout(self.vid1_container)
-        self.vid1_layout.setContentsMargins(0,0,0,0)
-        self.vid1_layout.addWidget(self.vid1_label)
+        self.main_video_container = QWidget()
+        self.main_video_layout = QVBoxLayout(self.main_video_container)
+        self.main_video_layout.setContentsMargins(0,0,0,0)
+        self.main_video_layout.addWidget(self.vid1_label)
+        self.vid1_widget.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.main_video_layout.addWidget(self.vid1_widget, stretch=1)
         
-        # Ensure video widget expands
-        self.vid1.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.vid1_layout.addWidget(self.vid1, stretch=1)
-        
-        self.main_layout.addWidget(self.vid1_container, stretch=1)
+        self.main_layout.addWidget(self.main_video_container, stretch=1)
 
-        # --- Video 2 (Anime) - Separate Window ---
-        self.vid2 = VideoWidget()
+        # Secondary Video (Slot 2)
+        self.vid2_widget = VideoWidget()
         self.second_window = SecondaryWindow()
-        self.second_window.layout().addWidget(self.vid2)
-        # We show it by default
+        self.second_window.layout().addWidget(self.vid2_widget)
         self.second_window.show()
 
-        # --- Overlay Container (Global Wrapper used in Main Window) ---
-        # Used when we toggle overlay mode
-        self.overlay_wrapper = DragResizableWidget(self.vid1) 
-        self.overlay_wrapper.setVisible(False)
-        self.overlay_wrapper.setLayout(QVBoxLayout())
-        self.overlay_wrapper.layout().setContentsMargins(0,0,0,0)
-
-        # --- Controls Area ---
-        # Wrap everything in a container for easy hiding
+    def _setup_controls(self):
         self.controls_container = QWidget()
         self.controls_layout = QVBoxLayout(self.controls_container)
         self.controls_layout.setContentsMargins(0,0,0,0)
@@ -366,9 +365,8 @@ class MainWindow(QWidget):
         self.slider.sliderPressed.connect(self._on_slider_pressed)
         self.slider.sliderReleased.connect(self._on_slider_released)
         self.slider.valueChanged.connect(self._on_slider_move)
-        self._user_seeking = False
         
-        # Buttons & Inputs
+        # Bottom Row
         btn_layout = QHBoxLayout()
         
         self.btn_load1 = QPushButton("Load Reaction")
@@ -383,7 +381,6 @@ class MainWindow(QWidget):
         self.btn_play = QPushButton("Play")
         self.btn_play.clicked.connect(self._toggle_play)
         
-        # Offset
         self.spin_offset = QDoubleSpinBox()
         self.spin_offset.setRange(-3600, 3600)
         self.spin_offset.setSingleStep(0.5)
@@ -391,25 +388,13 @@ class MainWindow(QWidget):
         self.spin_offset.setPrefix("Anime Offset: ")
         self.spin_offset.valueChanged.connect(self._update_offset)
         
-        # Overlay Toggle
         self.btn_overlay = QPushButton("Toggle Overlay")
         self.btn_overlay.setCheckable(True)
         self.btn_overlay.toggled.connect(self._toggle_overlay_mode)
 
-        # Volume Controls
-        self.vol1 = QSlider(Qt.Orientation.Horizontal)
-        self.vol1.setRange(0, 100)
-        self.vol1.setValue(100)
-        self.vol1.setFixedWidth(80)
-        self.vol1.setToolTip("Reaction Vol")
-        self.vol1.valueChanged.connect(self.vid1.set_volume)
-        
-        self.vol2 = QSlider(Qt.Orientation.Horizontal)
-        self.vol2.setRange(0, 100)
-        self.vol2.setValue(100)
-        self.vol2.setFixedWidth(80)
-        self.vol2.setToolTip("Anime Vol")
-        self.vol2.valueChanged.connect(self.vid2.set_volume)
+        # Volume
+        self.vol1 = self._create_vol_slider(self.vid1_widget)
+        self.vol2 = self._create_vol_slider(self.vid2_widget)
 
         btn_layout.addWidget(self.btn_load1)
         btn_layout.addWidget(self.btn_load2)
@@ -429,46 +414,53 @@ class MainWindow(QWidget):
         
         self.main_layout.addWidget(self.controls_container)
 
-    def toggle_video_fullscreen(self, video_widget):
-        """
-        Custom logic to hide controls/labels when making the video full in the main window.
-        """
+    def _create_vol_slider(self, target_widget: VideoWidget) -> QSlider:
+        s = QSlider(Qt.Orientation.Horizontal)
+        s.setRange(0, 100)
+        s.setValue(100)
+        s.setFixedWidth(80)
+        s.valueChanged.connect(target_widget.set_volume)
+        return s
+
+    def _setup_overlay(self):
+        # The overlay wrapper will hold whatever video is in the "secondary" slot when enabled
+        self.overlay_wrapper = DragResizableWidget(self.main_video_container) 
+        self.overlay_wrapper.setVisible(False)
+
+
+    def _setup_timer(self):
+        self.timer = QTimer()
+        self.timer.setInterval(REFRESH_RATE_MS)
+        self.timer.timeout.connect(self._update_progress)
+        self.timer.start()
+
+    # --- Video & Control Logic --- 
+
+    def toggle_video_fullscreen(self, video_widget: VideoWidget):
+        """Toggle fullscreen mode for the main window, hiding controls."""
         if self.is_fullscreen_video:
-            # Exit Fullscreen
             self.showNormal()
             self.controls_container.show()
-            self.vid1_label.show() # Assuming we only fullscreen vid1 here usually, but if swapped...
-            
-            # If swapped, we might have vid2 in main. We should just show whatever label is there.
-            # But wait, self.vid1_label text is static "Reaction Video".
-            # If we swapped, the CONTENT changed, but the label didn't change (my bad in implementation?)
-            # Actually, _swap_sources logic swaps widgets. So vid1_label STAYS in vid1_container.
-            # So if we swap, vid1_label is nicely sitting above the new content.
-            # So showing/hiding it is correct.
+            self.vid1_label.show() 
             self.is_fullscreen_video = False
         else:
-            # Enter Fullscreen
             self.controls_container.hide()
             self.vid1_label.hide()
             self.showFullScreen()
             self.is_fullscreen_video = True
 
-    # ------------------------------------------------
-    # Logic
-    # ------------------------------------------------
-    def _load_file(self, vid_idx):
+    def _load_file(self, vid_idx: int):
         path, _ = QFileDialog.getOpenFileName(self, "Select Video", "", "Video Files (*.mp4 *.mkv *.avi *.mov)")
         if not path: return
 
         if vid_idx == 1:
-            self.vid1.load(path)
-            # Update master duration logic
+            self.vid1_widget.load(path)
             QTimer.singleShot(500, self._refresh_duration)
         else:
-            self.vid2.load(path)
+            self.vid2_widget.load(path)
 
     def _refresh_duration(self):
-        d = self.vid1.get_duration()
+        d = self.vid1_widget.get_duration()
         if d > 0:
             self.duration_video1 = d
             self.slider.setRange(0, int(d * 10))
@@ -477,166 +469,127 @@ class MainWindow(QWidget):
         self.is_playing = not self.is_playing
         self.btn_play.setText("Pause" if self.is_playing else "Play")
         if self.is_playing:
-            self.vid1.play()
-            self.vid2.play()
+            self.vid1_widget.play()
+            self.vid2_widget.play()
         else:
-            self.vid1.pause()
-            self.vid2.pause()
+            self.vid1_widget.pause()
+            self.vid2_widget.pause()
             self._sync_anime_pos()
 
-    def _update_offset(self, val):
+    def _update_offset(self, val: float):
         self.offset = val
         if not self.is_playing:
             self._sync_anime_pos()
 
     def _sync_anime_pos(self):
-        t1 = self.vid1.get_time()
+        t1 = self.vid1_widget.get_time()
         t2_target = t1 - self.offset
-        self.vid2.seek(t2_target)
+        self.vid2_widget.seek(t2_target)
 
     def _update_progress(self):
         if not self._user_seeking and self.is_playing:
-            t = self.vid1.get_time()
+            t = self.vid1_widget.get_time()
             self.slider.setValue(int(t * 10))
             
-            t2 = self.vid2.get_time()
+            t2 = self.vid2_widget.get_time()
             target_t2 = t - self.offset
             
-            if abs(t2 - target_t2) > 0.5:
-                 self.vid2.seek(target_t2)
+            # Sync check
+            if abs(t2 - target_t2) > SYNC_THRESHOLD_SEC:
+                 self.vid2_widget.seek(target_t2)
 
     def _on_slider_pressed(self):
         self._user_seeking = True
-        self.vid1.pause()
-        self.vid2.pause()
+        self.vid1_widget.pause()
+        self.vid2_widget.pause()
 
     def _on_slider_released(self):
         self._user_seeking = False
         val = self.slider.value() / 10.0
-        self.vid1.seek(val)
-        self.vid2.seek(val - self.offset)
+        self.vid1_widget.seek(val)
+        self.vid2_widget.seek(val - self.offset)
         if self.is_playing:
-            self.vid1.play()
-            self.vid2.play()
+            self.vid1_widget.play()
+            self.vid2_widget.play()
 
-    def _on_slider_move(self, val_int):
+    def _on_slider_move(self, val_int: int):
         if self._user_seeking:
             val = val_int / 10.0
-            self.vid1.seek(val)
-            self.vid2.seek(val - self.offset)
+            self.vid1_widget.seek(val)
+            self.vid2_widget.seek(val - self.offset)
 
     # --- View Logic (Swap & Overlay) ---
 
     def _swap_sources(self):
-        # We want to swap the visual positions of vid1 and vid2.
-        # Logic: 
-        # 1. Identify which widget is currently 'main' (background) and which is 'secondary' (overlay/window)
-        # 2. Swap their parents.
-        
-        # State tracking:
-        # We need to know where they currently are.
-        # Case A: Separate Windows
-        #   VidA in Main, VidB in Window
-        # Case B: Overlay Mode
-        #   VidA in Main, VidB in OverlayWrapper
-        
-        # Simplest way: Check parents
-        p1 = self.vid1.parent()
-        p2 = self.vid2.parent()
-        
-        # Helper to get the correct layout/widget to add to
-        def get_adder(parent_widget):
-            # If parent is DragResizableWidget, user layout()
-            # If parent is QWidget container, use layout()
-            if parent_widget:
-                return parent_widget.layout()
-            return None
+        """
+        Swaps the widgets between the Main Container (Slot 1) and the Secondary Container (Slot 2).
+        Slot 2 can be either the Second Window or the Overlay Wrapper.
+        """
+        # 1. Identify current occupants
+        current_primary = self.primary_video_widget
+        current_secondary = self.secondary_video_widget
 
-        # Perform the swap
-        # We need to temporarily remove them to avoid "Already has parent" checks firing weirdly or layout issues
+        # 2. Determine target containers
+        container_1 = self.main_video_layout # Always main video layout
         
-        # Swap logic is tricky because of the specialized containers (vid1_container vs second_window vs overlay_wrapper)
-        # Let's define the "Slots":
-        # Slot 1: vid1_container (The main window background)
-        # Slot 2: EITHER second_window OR overlay_wrapper (The secondary view)
-        
-        # Find who occupies Slot 1
-        occupant_1 = None
-        if self.vid1_container.layout().indexOf(self.vid1) != -1: occupant_1 = self.vid1
-        elif self.vid1_container.layout().indexOf(self.vid2) != -1: occupant_1 = self.vid2
-        
-        # Find who occupies Slot 2
-        occupant_2 = None
-        # Check overlay first (highest priority if visible)
+        # Container 2 depends on mode
         if self.overlay_mode:
-            # Check content_container layout of drag widget
-            cL = self.overlay_wrapper.content_layout
-            if cL.indexOf(self.vid1) != -1: occupant_2 = self.vid1
-            elif cL.indexOf(self.vid2) != -1: occupant_2 = self.vid2
+            container_2_adder = self.overlay_wrapper.set_content
         else:
-            if self.second_window.layout().indexOf(self.vid1) != -1: occupant_2 = self.vid1
-            elif self.second_window.layout().indexOf(self.vid2) != -1: occupant_2 = self.vid2
+            # For HBoxLayout/VBoxLayout we addWidget. 
+            container_2_adder = lambda w: (self.second_window.layout().addWidget(w), w.show())
 
-        if not occupant_1 or not occupant_2:
-            print("Layout state confusion during swap!")
-            return
+        # 3. Detach both widgets to prevent parent conflicts
+        current_primary.setParent(None)
+        current_secondary.setParent(None)
 
-        # Execute Swap
-        # Remove both
-        occupant_1.setParent(None)
-        occupant_2.setParent(None)
+        # 4. Swap Logic
+        # New Primary -> Was Secondary
+        # New Secondary -> Was Primary
         
-        # Add occupant_2 -> Slot 1
-        self.vid1_container.layout().addWidget(occupant_2)
-        occupant_2.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        occupant_2.show()
+        # Add new Primary (the old secondary) to Slot 1
+        container_1.addWidget(current_secondary)
+        current_secondary.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        current_secondary.show()
         
-        # Add occupant_1 -> Slot 2
-        if self.overlay_mode:
-            self.overlay_wrapper.set_content(occupant_1)
-        else:
-            self.second_window.layout().addWidget(occupant_1)
-        occupant_1.show()
-        
-        # Note: The 'Master' control logic (slider/play) still targets self.vid1 explicitly regardless of view position.
-        # This is usually desired (Reaction video stays the master timeline).
+        # Add new Secondary (the old primary) to Slot 2
+        container_2_adder(current_primary)
+        if not self.overlay_mode:
+             self.second_window.show()
 
-    def _toggle_overlay_mode(self, enabled):
+        # 5. Update State Tracking
+        self.primary_video_widget = current_secondary
+        self.secondary_video_widget = current_primary
+
+    def _toggle_overlay_mode(self, enabled: bool):
         self.overlay_mode = enabled
         
-        # Determine who is the "Secondary" content right now
-        # It's whoever is NOT in the vid1_container (Main Window Background)
-        
-        secondary_widget = None
-        if self.vid1_container.layout().indexOf(self.vid1) == -1: secondary_widget = self.vid1
-        else: secondary_widget = self.vid2
+        # The widget currently considered "secondary" is the one moving
+        target_widget = self.secondary_video_widget
         
         if enabled:
-            # Switch to Overlay Mode
+            # Mode: Window -> Overlay
             self.second_window.hide()
             
-            # Move secondary -> Overlay
-            # self.overlay_wrapper is now the DragResizableWidget (QStackedLayout)
-            # We use set_content
-            self.overlay_wrapper.set_content(secondary_widget)
-            secondary_widget.show()
+            # Move widget to overlay
+            target_widget.setParent(None)
+            self.overlay_wrapper.set_content(target_widget)
+            target_widget.show()
             
             # Show overlay
-            self.overlay_wrapper.resize(320, 180)
-            self.overlay_wrapper.move(20, 20)
+            self.overlay_wrapper.resize(*OVERLAY_DEFAULT_SIZE)
+            self.overlay_wrapper.move(*OVERLAY_DEFAULT_POS)
             self.overlay_wrapper.show()
             self.overlay_wrapper.raise_()
             
         else:
-            # Switch back to Separate Window Mode
+            # Mode: Overlay -> Window
             self.overlay_wrapper.hide()
             
-            # Move secondary -> Window
-            # But wait, secondary_widget is now child of overlay_wrapper.content_container
-            # setParent handles reparenting cleanly
-            secondary_widget.setParent(self.second_window)
-            self.second_window.layout().addWidget(secondary_widget)
-            secondary_widget.show()
+            # Move widget back to window
+            target_widget.setParent(None)
+            self.second_window.layout().addWidget(target_widget)
+            target_widget.show()
             
             self.second_window.show()
 
@@ -644,9 +597,7 @@ class MainWindow(QWidget):
         self.second_window.close()
         super().closeEvent(event)
 
-# -----------------------------------------------------------------------------
-# 5. Secondary Window
-# -----------------------------------------------------------------------------
+
 class SecondaryWindow(QWidget):
     def __init__(self):
         super().__init__()
@@ -659,16 +610,14 @@ class SecondaryWindow(QWidget):
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     
-    # Pre-flight check
     if not check_mpv_available():
         msg = QMessageBox()
         msg.setIcon(QMessageBox.Icon.Critical)
         msg.setWindowTitle("Missing MPV Library")
         msg.setText("Could not load 'libmpv'.")
         msg.setInformativeText(
-            "Please download libmpv (mpv-2.dll or mpv-1.dll) and place it in this folder:\n"
-            f"{os.getcwd()}\n\n"
-            "You can download it from: https://sourceforge.net/projects/mpv-player-windows/files/libmpv/"
+            "Please download libmpv (mpv-2.dll) and place it in the 'libs/' folder.\n"
+            f"Expected: {os.path.join(os.getcwd(), 'libs', 'mpv-2.dll')}\n"
         )
         msg.exec()
         sys.exit(1)
