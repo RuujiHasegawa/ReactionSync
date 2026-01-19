@@ -100,8 +100,8 @@ class GripWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         
-        # Ensure it behaves as a sub-window without decorations
-        self.setWindowFlags(Qt.WindowType.SubWindow | Qt.WindowType.FramelessWindowHint)
+        # Ensure it behaves as a sub-window without decorations, AND stays on top of the MPV window
+        self.setWindowFlags(Qt.WindowType.SubWindow | Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         
         self.setMouseTracking(True)
         self.margin = 10
