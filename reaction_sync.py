@@ -100,6 +100,9 @@ class GripWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         
+        # Ensure it behaves as a sub-window without decorations
+        self.setWindowFlags(Qt.WindowType.SubWindow | Qt.WindowType.FramelessWindowHint)
+        
         self.setMouseTracking(True)
         self.margin = 10
         self._is_moving = False
