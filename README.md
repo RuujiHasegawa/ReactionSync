@@ -1,5 +1,9 @@
 # ReactionSync
 
+> [!NOTE]
+> This project was "vibe-coded" and written with the assistance of AI. While it is fully functional, the code structure and implementation details may reflect the iterative and assisted nature of its development. Use with this context in mind!
+
+
 ReactionSync is a Python-based desktop application designed for syncing two video files, typically a "Reaction" video and a "Source" (e.g., Anime) video. It provides a synchronized playback experience with offsets, dual volume controls, and an overlay (Picture-in-Picture) mode.
 
 ## Features
@@ -66,7 +70,3 @@ ReactionSync is a Python-based desktop application designed for syncing two vide
 - **"Could not load libmpv"**: Ensure `mpv-2.dll` is in the same folder as the script.
 - **Video not playing**: Ensure the file format is supported by mpv (most formats are).
 
-## Disclaimer
-
-> [!NOTE]
-> This project was "vibe-coded" and written with the assistance of AI. While it is fully functional, the code structure and implementation details may reflect the iterative and assisted nature of its development. Use with this context in mind!
