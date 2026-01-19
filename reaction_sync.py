@@ -85,6 +85,7 @@ class DragResizableWidget(QFrame):
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
         self.grip.resize(self.size())
+        self.grip.raise_()
 
 
 class GripWidget(QWidget):
@@ -97,6 +98,7 @@ class GripWidget(QWidget):
         self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
         self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
         
         self.setMouseTracking(True)
         self.margin = 10
@@ -105,10 +107,12 @@ class GripWidget(QWidget):
         self._resize_edge: Optional[str] = None
         self._drag_start_pos = QPoint()
         
-        # Near-transparent background is needed for hit-testing on some systems/setups
-        # with native windows, but completely transparent might fall through.
-        # "rgba(0,0,0,1)" is effectively invisible but clickable.
+        # "rgba(0,0,0,1)" is minimal alpha for hit-testing without being visible
         self.setStyleSheet("background-color: rgba(0, 0, 0, 1);")
+        
+    def paintEvent(self, event):
+        # Do not paint anything, just let the background be (which is translucent)
+        pass
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
