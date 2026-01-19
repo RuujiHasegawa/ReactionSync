@@ -111,23 +111,27 @@ class GripWidget(QWidget):
                 self._drag_start_pos = event.globalPosition().toPoint()
             else:
                 self._is_moving = True
-                self._drag_start_pos = event.pos()
+                self._drag_start_pos = event.globalPosition().toPoint()
 
     def mouseMoveEvent(self, event: QMouseEvent):
         if self._is_moving:
-            # Move the TARGET (parent) relative to its parent
-            # Calculate the offset relative to the initial click position
-            target_parent_pos = self.target.mapToParent(event.pos() - self._drag_start_pos)
+            # Calculate global value difference
+            current_pos = event.globalPosition().toPoint()
+            diff = current_pos - self._drag_start_pos
+            self._drag_start_pos = current_pos
+            
+            # Apply to target's current position
+            new_pos = self.target.pos() + diff
             
             # Boundary check if parent exists
             if self.target.parentWidget():
                 p_rect = self.target.parentWidget().rect()
                 # Keep somewhat inside boundaries
-                new_x = max(0, min(target_parent_pos.x(), p_rect.width() - 20))
-                new_y = max(0, min(target_parent_pos.y(), p_rect.height() - 20))
+                new_x = max(0, min(new_pos.x(), p_rect.width() - 20))
+                new_y = max(0, min(new_pos.y(), p_rect.height() - 20))
                 self.target.move(new_x, new_y)
             else:
-                self.target.move(target_parent_pos)
+                self.target.move(new_pos)
             return
 
         if self._is_resizing and self._resize_edge:
