@@ -92,6 +92,11 @@ class GripWidget(QWidget):
     def __init__(self, parent_resizable: QWidget):
         super().__init__(parent_resizable)
         self.target = parent_resizable
+        
+        # Make this a native window so it sits ON TOP of the MPV native window
+        self.setAttribute(Qt.WidgetAttribute.WA_NativeWindow)
+        self.setAttribute(Qt.WidgetAttribute.WA_DontCreateNativeAncestors)
+        
         self.setMouseTracking(True)
         self.margin = 10
         self._is_moving = False
@@ -99,8 +104,10 @@ class GripWidget(QWidget):
         self._resize_edge: Optional[str] = None
         self._drag_start_pos = QPoint()
         
-        # Transparent
-        self.setStyleSheet("background-color: transparent;")
+        # Near-transparent background is needed for hit-testing on some systems/setups
+        # with native windows, but completely transparent might fall through.
+        # "rgba(0,0,0,1)" is effectively invisible but clickable.
+        self.setStyleSheet("background-color: rgba(0, 0, 0, 1);")
 
     def mousePressEvent(self, event: QMouseEvent):
         if event.button() == Qt.MouseButton.LeftButton:
